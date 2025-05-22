@@ -1,0 +1,1145 @@
+---
+title: "Disruptions to Midwater Food Webs from Deep-Sea Mining Discharge; Bayesian Mixing Model, Zooplankton Demo"
+author: "Michael Dowd"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  #html_document: 
+  bookdown::html_document2:  
+    self-contained: yes
+    theme: cerulean #paper #cosmo #journal #readable
+    toc: true
+    smooth_scroll: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    fig_caption: yes
+    code_folding: hide
+---
+
+```{r setup, echo=FALSE, warning=FALSE}
+# This chunk sets up a working directory, loads packages, and sets global chunk
+# options for the .Rmd document
+
+rm(list=ls()) # clean up
+
+## set working directory to the same folder that contains this .rmd file
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+## load packages quietly
+shhh <- suppressPackageStartupMessages 
+want <- c("knitr", 
+          "base",
+          "coda",
+          "dendextend",
+          "DirichletReg", 
+          "forcats",
+          "ggforce",
+          "ggplot2",
+          "ggpubr",
+          "graphics",
+          "openxlsx",
+          "reshape2",
+          "runjags",
+          "stats",
+          "tidyverse")
+
+for (pkg in want) shhh(library(pkg, character.only=TRUE))
+
+## set some chunk options
+gr <- (1+sqrt(5))/2 # golden ratio, for figures
+opts_chunk$set(comment="  ",
+               fig.asp=0.9/gr,       # <--- gr used here
+               fig.align="center",
+               #echo=FALSE,
+               cache=c(TRUE, FALSE)[1], 
+               eval.after="fig.cap", # for dynamic captions
+               collapse=TRUE, 
+               dev="png", # svg, pdf, jpg, tiff
+               fig.width=7.0,
+               out.width="95%"
+               )
+
+# setting the ggplot theme
+theme_set(theme_classic2()+
+            theme(panel.grid.major.x = element_line(colour = "grey95"),
+                  panel.grid.major.y = element_line(colour = "grey95")))
+# defining a ggplot object to remove the x axis
+no.x.axis <- theme(axis.title.x=element_blank(),
+                   axis.text.x=element_blank(),
+                   axis.ticks.x=element_blank())
+# defining a ggplot object to remove the y axis
+no.y.axis <- theme(axis.title.y=element_blank(),
+                   axis.text.y=element_blank(),
+                   axis.ticks.y=element_blank())
+
+## fresh start? If FALSE (select 2 in hard bracket), will only rerun a chunk if 
+## changes are detected within the text of that chunk.
+rmCache <- c(TRUE, FALSE)[1] 
+if (rmCache) {
+  tfn <- knitr::current_input()              # name of this file
+  tfn <- substr(tfn, 1, nchar(tfn)-4)        # Remove the ".Rmd"
+  tfn_cache <- paste0(tfn, "_cache")         # Append "_cache" to it
+  if (file.exists(tfn_cache))                # If the cache exists...
+    unlink(tfn_cache, recursive=TRUE)        # ...delete it.
+}
+```  
+
+# Summary {-}  
+The purpose of this notebook is to diagnose the relative importance of 3 particle sources to a food web of higher order consumer, used in the paper "Disruptions to Midwater Food Webs from Deep-Sea Mining Discharge" by Dowd et al., 2025. Two demo notebooks are included, one for Japatella collected in the Clarion Clipperton Zone in Fall 2021 from 850-1250 m, and one for Zooplankton 1.0-2.0 mm in size, also collected in Fall 2021 from 750-1375 m.
+
+This notebook is meant to demonstrate the mixing model code, and extraneous analyses that lengthen the run time have been removed. As long as this notebook is downloaded with the demo data, it should be able to be run without any changes necessary. If there are problems may relate to the file destination, these have been marked with "Find Me" to troubleshoot to whatever folder is in use.
+
+The model code contained herein represents the base code for our stable isotope-based food web model as of 5/21/2025. We use a 3 endmember mixing model, as the 3 size fractions of partcles are isotopically distinct. Due to similarity of the medium and large particles to the plume waste, as discussed in the paper, the medium and large size fractions are combined post analysis.
+
+# Setup {-}
+
+In this first few chunks, the user should enter all of the basic information that the model code will need to proceed with analysis.
+
+The first chunk identifies tracers to be included in the model and how to treat them, as well as define some functions for diagnostics and extraction of data.
+
+
+```{r identifying_tracers_func}
+
+## SPECIFYING TRACERS TO BE USED IN MODEL ##
+
+## Should amino acid δ15N data be included? (T/F)
+include_d15N <- TRUE
+
+## Should amino acid δ13C data be included? (T/F)
+include_d13C <- TRUE
+
+# If using δ15N values in model
+ if(include_d15N == TRUE) {
+  ## Which amino acid δ15N values should be included in the model? 
+  ## These amino acids won't necessarily be used in the mxing model, but their values at the base of th food web will be calculated
+  # Specify the column names of all amino acid d15N values that will be included in the model and their standard deviations (should be consistent with column names in data file)
+  tracers_d15N <- c( "Phe_N", "Lys_N")
+  SDtracers_d15N <- c( "Phe_N_sd", "Lys_N_sd")
+} else {
+  tracers_d15N <- c()
+  SDtracers_d15N <- c()
+}
+# If using δ13C values in model
+if(include_d13C == TRUE) {
+  ## Which essential amino acid δ13C values should be included in the model? 
+  ## These amino acids won't necessarily be used in the mxing model, but their values at the base of th food web will be calculated
+  # Specify the column names of all amino acid d15N values that will be included in the model and their standard deviations (should be consistent with column names in data file)
+  tracers_d13C <- c( "Leu_C")
+  ## What columns in the data file contain the uncertainties in those δ13C values?
+  SDtracers_d13C <- c( "Leu_C_sd")
+} else {
+  tracers_d13C <- c()
+  SDtracers_d13C <- c()
+}
+
+# Now we'll make one vector containing all of the tracers to be used in the model
+tracers <- c(tracers_d15N, tracers_d13C)
+SDtracers <- c(SDtracers_d15N, SDtracers_d13C)
+
+
+## Which amino acids will be used in the mixing model to assess sources of organic matter to the food web?
+## These amino acids need to be present in the tracer list above.
+
+# tracers_mixing <-
+#   tracers[which(tracers %in%
+#                   c("Phe_N",
+#                       "Lys_N",
+#                     "Leu_C"
+#                     )
+#   )]
+# SDtracers_mixing <-
+#   SDtracers[which(SDtracers %in%
+#                     c("Phe_N_sd",
+#                       "Lys_N_sd",
+#                     "Leu_C_sd"
+#                     )
+#   )]
+
+#Makes it so all tracers are in tracers_mixing, without re-specifying
+tracers_mixing = tracers
+SDtracers_mixing = SDtracers
+
+
+# Last we'll define some generic groups of AAs that may be useful later on.
+# Update to reflect the column names in your data
+# all amino acids
+allAA = c("Glu", "Asp", "Ala", "Iso", "Leu", "Pro", "Val", "Gly", "Ser", "Phe", "Lys", "Thr", "SAA", "EAA")
+# columns with SD
+SDallAA <- c("SDGlu", "SDAsp", "SDAla", "SDIso", "SDLeu", "SDPro", "SDVal", "SDGly", "SDSer", "SDPhe", "SDLys", "SDThr", "SDSAA", "SDEAA")
+
+
+
+
+post.mode <- function(post) {
+  # first calculate the density function for the posterior PDF
+  # this bins the data in n bins
+  post.d <- density(post, n=512*2)
+  # then find the index of the bin with the highest density
+  bin.index <-with(post.d, which.max(y))
+  # then find the variable value of the PDF in that bin
+  with(post.d, x[bin.index])
+}
+
+# Function(s) for plotting properties of mcmc coda objects.
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+DbdaAcfPlot <- function( codaObject , 
+                         parName=varnames(codaObject)[1] , 
+                         plColors=NULL ) {
+  # Calls coda::effectiveSize()
+  if ( all( parName != varnames(codaObject) ) ) { 
+    stop("parName must be a column name of coda object")
+  }
+  nChain = length(codaObject) # or coda::nchains()
+  if ( is.null(plColors) ) plColors=1:nChain
+  xMat = NULL
+  yMat = NULL
+  for ( cIdx in 1:nChain ) {
+    acfInfo = acf(codaObject[,c(parName)][[cIdx]],plot=FALSE) 
+    xMat = cbind(xMat,acfInfo$lag)
+    yMat = cbind(yMat,acfInfo$acf)
+  }
+  matplot( xMat , yMat , type="o" , pch=20 , col=plColors , ylim=c(0,1) ,
+           main="" , xlab="Lag" , ylab="Autocorrelation" )
+  abline(h=0,lty="dashed")
+  EffChnLngth = effectiveSize(codaObject[,c(parName)])
+  text( x=max(xMat) , y=max(yMat) , adj=c(1.0,1.0) , cex=1.25 ,
+        labels=paste("ESS =",round(EffChnLngth,1)) )
+} # end DbdaAcfPlot()
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+DbdaDensPlot <- function( codaObject , 
+                          parName=varnames(codaObject)[1] , 
+                          plColors=NULL, 
+                          bty="o", yaxt="s",   # added by NF
+                          xlab="Param. Value", # added by NF
+                          cex.lab=1.2          # added by NF
+                          ) {
+  # Calls coda::effectiveSize(), HDIofMCMC()
+  if ( all( parName != varnames(codaObject) ) ) { 
+    stop("parName must be a column name of coda object")
+  }
+  nChain <- length(codaObject) # or coda::nchain(codaObject)
+  if ( is.null(plColors) ) plColors=1:nChain
+  xMat <- NULL
+  yMat <- NULL
+  hdiLims <- NULL
+  for ( cIdx in 1:nChain ) {
+    densInfo <- density( codaObject[,c(parName)][[cIdx]] ) 
+    xMat <- cbind(xMat,densInfo$x)
+    yMat <- cbind(yMat,densInfo$y)
+    hdiLims <- cbind( hdiLims, HDIofMCMC(codaObject[,c(parName)][[cIdx]]) )
+  }
+  matplot( xMat , yMat , type="l" , col=plColors , bty=bty,
+           main="" , xlab=xlab , ylab="Density",
+           bty=bty, yaxt=yaxt, cex.lab=cex.lab ) # added by NF
+  abline(h=0)
+  points( hdiLims[1,] , rep(0,nChain) , col=plColors , pch="|" )
+  points( hdiLims[2,] , rep(0,nChain) , col=plColors , pch="|" )
+  text( mean(hdiLims) , 0 , "95% HDI" , adj=c(0.5,-0.2) )
+  EffChnLngth <- effectiveSize(codaObject[,c(parName)])
+  MCSE <- sd(as.matrix(codaObject[,c(parName)]))/sqrt(EffChnLngth) 
+  text( max(xMat) , max(yMat) , adj=c(1.0,1.0) , cex=1.1 ,
+        paste("MCSE =\n",signif(MCSE,3)) )
+} # end DbdaDensPlot()
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+diagMCMC <- 
+  function( codaObject , parName=varnames(codaObject)[1] ) {
+  # Calls coda::traceplot(), coda::gelman.plot(), DbdaAcfPlot(), DbdaDensPlot()
+  
+  DBDAplColors <- c("skyblue","black","royalblue","steelblue")
+  par( mar=0.5+c(3,4,1,0) , 
+       oma=0.1+c(0,0,2,0) , 
+       mgp=c(2.25,0.7,0) , 
+       cex.lab=1.5 
+       )
+  
+  layout(matrix(1:4,nrow=2))
+  
+  coda::traceplot( codaObject[,c(parName)] , main="" , ylab="Param. Value" ,
+                   col=DBDAplColors ) 
+  tryVal <-  try(
+    coda::gelman.plot( codaObject[,c(parName)] , main="" , auto.layout=FALSE , 
+                       col=DBDAplColors ) )  
+  
+  # if it runs, gelman.plot returns a list with finite shrink values:
+  if ( class(tryVal)=="try-error" ) {
+    plot.new() # skip this plot
+    print(paste0("Warning: coda::gelman.plot fails for ", parName))
+  } else if ( class(tryVal)=="list" & !is.finite(tryVal$shrink[1]) ) {
+    plot.new() # skip this plot
+    print(paste0("Warning: coda::gelman.plot fails for ", parName))
+  }
+
+  DbdaAcfPlot(codaObject, parName, plColors=DBDAplColors)
+  DbdaDensPlot(codaObject, parName, plColors=DBDAplColors)
+  mtext( text=parName, outer=TRUE, adj=c(0.5,0.5), cex=2.0 )
+
+} # end diagMCMC()
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+HDIofMCMC <- function( sampleVec , credMass=0.95 ) {
+  # Computes highest density interval from a sample of representative values,
+  #   estimated as shortest credible interval.
+  # Arguments:
+  #   sampleVec
+  #     is a vector of representative values from a probability distribution.
+  #   credMass
+  #     is a scalar between 0 and 1, indicating the mass within the credible
+  #     interval that is to be estimated.
+  # Value:
+  #   HDIlim is a vector containing the limits of the HDI
+  sortedPts <- sort( sampleVec )
+  ciIdxInc <- # How many sample elements are in the CI?
+    ceiling( credMass * length( sortedPts ) )
+  nCIs <-     # number of possible CIs
+    length( sortedPts ) - ciIdxInc
+  ciWidth <- rep( 0 , nCIs ) # create storage
+  for ( i in 1:nCIs ) {
+    ciWidth[ i ] <- # last value in CI - first value in CI
+      sortedPts[ i + ciIdxInc ] - sortedPts[ i ]
+  } # end for
+  HDImin <- sortedPts[ which.min( ciWidth ) ]
+  HDImax <- sortedPts[ which.min( ciWidth ) + ciIdxInc ]
+  HDIlim <- c( HDImin , HDImax )
+  return( HDIlim )
+} # end HDIofMCMC()
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+```
+
+
+Next we will need to import data for the possible sources of organic matter.
+
+This Demo has already isolated the source and consumer data, providing only the data actually used in the model and shown in the paper
+
+```{r Choose Source and Consumer Data, eval=TRUE, fig.asp=0.6, out.width="100%"}
+
+
+#Find Me
+#May need to change link to correct folder
+
+Data_Sources <- read.xlsx("../Bayesian_Code/Excel_Sheets/Data_Sources.xlsx")
+Data_Japatella <- read.xlsx("../Bayesian_Code/Excel_Sheets/Data_Japatella.xlsx")
+Data_10_Fall <- read.xlsx("../Bayesian_Code/Excel_Sheets/Data_10_Fall.xlsx")
+
+
+#Factor Columns
+Data_Sources$Type = factor(Data_Sources$Type)
+Data_Sources$Pore = factor(Data_Sources$Pore,
+                           levels = c("0.7-6 \u03bcm", "6-53 \u03bcm",
+                                      ">53 \u03bcm"))
+Data_Sources$Cruise = factor(Data_Sources$Cruise)
+Data_Sources$Oxygen = factor(Data_Sources$Oxygen)
+
+
+Data_Japatella$Type = factor(Data_Japatella$Type)
+Data_Japatella$Pore = factor(Data_Japatella$Pore)
+Data_Japatella$Cruise = factor(Data_Japatella$Cruise)
+Data_Japatella$Oxygen = factor(Data_Japatella$Oxygen)
+
+
+Data_10_Fall$Type = factor(Data_10_Fall$Type)
+Data_10_Fall$Pore = factor(Data_10_Fall$Pore)
+Data_10_Fall$Cruise = factor(Data_10_Fall$Cruise)
+Data_10_Fall$Oxygen = factor(Data_10_Fall$Oxygen)
+
+#Basic colors and breaks
+
+frac.color.breaks = c("0.7-6 \u03bcm", "6-53 \u03bcm", ">53 \u03bcm",
+                      "0.2-0.5 mm", "0.5-1.0 mm", "1.0-2.0 mm", "2.0-5.0 mm",
+                      "Caridean", "Cyclothone", "Japatella", "Myctophid","Mysid")
+
+frac.color = c("#E69F00", "#CC79A7", "#009E73",
+                        "#56B4E9", "#0072B2", "indianred4", "#F0E442",
+                        "red", "black", "coral", "cyan", "honeydew4")
+
+cruise.breaks = c("Spring 2021", "Fall 2021", "Fall 2022")
+
+type.breaks = c('Background Particle', 'Zooplankton', 'Micronekton',
+                                'Trap', 'Plume Particle', 'Discharge Particle')
+
+
+
+#Define source variable used in the mixing model, and any additional variables that should be kept for sample identfication purposes
+
+Source_Variable <- "Pore"
+
+Additional_Variables = c("Sample", "Type", "Depth", "Cruise",
+                  "Oxygen_Category")
+
+variables = c(Source_Variable, Additional_Variables)
+
+Sources = c("0.7-6 \u03bcm", "6-53 \u03bcm", ">53 \u03bcm")
+
+#Define the Source data so we do not change the original table
+
+Background_Sources = Data_Sources
+
+#Define Consumer data so we do not change original table
+
+Micronekton_Consumer = Data_Japatella
+
+Zooplankton_Consumer = Data_10_Fall
+
+
+
+#Select only Variables and tracer/sd
+Background_Sources = Background_Sources %>% 
+  dplyr::select(c(variables, tracers, SDtracers))
+
+Micronekton_Consumer = Micronekton_Consumer %>% 
+  dplyr::select(c(variables, tracers, SDtracers))
+
+Zooplankton_Consumer = Zooplankton_Consumer %>% 
+  dplyr::select(c(variables, tracers, SDtracers))
+
+```
+
+
+```{r Background Removal}
+
+#Remove any Source data that has missing columns
+
+  Data_sources <- na.omit(Background_Sources[c(variables, tracers, SDtracers)])
+    # all samples containing NAs will be removed from data
+
+  ## we will also find the mean tracer value for each source group
+  src.mn <- aggregate(Background_Sources[tracers], # aggregate source data
+                      by=list(Group = Background_Sources[[Source_Variable]]), # by organic matter source group
+                      FUN = mean, na.rm=TRUE)[-1] # taking a mean
+  
+```
+
+We will visualize the source data as in Figure S2
+
+```{r AA_Plots_Sources, dpi=300, fig.asp=0.4, fig.width=8.5}
+C_N_label = c("C" = "d13C", "N" = "d15N")
+
+
+  sources.dC.long <- 
+    melt(Data_sources, id.vars=c(variables), measure.vars = tracers_d13C,
+         variable.name="AA")
+  sources.dC.long$Isotope<- "C"
+  
+  sources.dN.long <- 
+    melt(Data_sources, id.vars=c(variables), measure.vars = tracers_d15N,
+         variable.name="AA")
+  sources.dN.long$Isotope<- "N"
+  
+  sources.long <- rbind(sources.dN.long,sources.dC.long)
+
+sources.long$AA <- factor(substr(sources.long$AA, start=1, stop=3), levels = allAA)
+
+
+AA_plots <-
+  ggplot(sources.long, aes(x = AA, y = value, color = Pore, group=Pore))+
+  geom_point(alpha=1, size=2.5, position = position_dodge(width = 0.8))+
+  ylab(expression(delta^{15}*N*"   or   "*delta^{13}*C*" (\u2030)"))+
+  labs(color="Pore", shape="Food Web Base", fill="Zooplankton Samples")+
+  scale_color_manual(breaks=frac.color.breaks,
+                       values=frac.color)+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.3, hjust=1))+
+  facet_row(~Isotope, scales="free", space="free", labeller=as_labeller(C_N_label))
+AA_plots
+
+   
+```
+
+
+# Selecting zooplankton data {-}
+
+```{r Consumer Removal}
+
+#Remove any consumer data that has missing columns
+#Choosing which consumer to use
+
+Data_zoops <- na.omit(Zooplankton_Consumer)
+
+
+```
+
+
+
+# Solving food web model using MCMC - vague prior {-}
+Next, we will use Markov Chain Monte Carlo to find PDFs describing the most likely solutions to our mixing problem. First we will write a BUGS model, then use JAGS to do the MCMC. The model uses an "uniformative"/generalist prior.
+
+## Drafting a BUGS model {-}
+First we will write up our BUGS model.
+
+```{r FWM_3, eval=TRUE}
+
+FWM_3 <- "model {
+/* observe tracers in sources */
+  # Each row will be a sample
+  # Each column will be a tracer
+    
+  # Small Particles - A
+  for (i in 1:N_A) { # Loop though all samples of this type
+    for (j in 1:N_T) { # Loop through all tracers of for each sample
+      X_A[i,j] ~ dnorm(mean_A[j], 1/sd_A[j]^2)
+    }
+  }
+  
+  # Medium Particles - B
+  for (i in 1:N_B) { # Loop though all samples of this type
+    for (j in 1:N_T) { # Loop through all tracers of for each sample
+      X_B[i,j] ~ dnorm(mean_B[j], 1/sd_B[j]^2)
+    }
+  }
+  
+  # Large Particles - C
+  for (i in 1:N_C) { # Loop though all samples of this type
+    for (j in 1:N_T) { # Loop through all tracers of for each sample
+      X_C[i,j] ~ dnorm(mean_C[j], 1/sd_C[j]^2)
+    }
+  }
+  
+  
+  /* uniform priors for tracer means in prey/sources */
+  for (j in 1:N_T) {
+    mean_A[j] ~ dunif(-100,100)
+    mean_B[j] ~ dunif(-100,100)
+    mean_C[j] ~ dunif(-100,100)
+  }
+  /* approximate reciprocal priors for tracer sd in prey/sources */
+  for (j in 1:N_T) {
+    sd_A[j] ~ dgamma(0.001, 0.001) T(,2)
+    sd_B[j] ~ dgamma(0.001, 0.001) T(,2)
+    sd_C[j] ~ dgamma(0.001, 0.001) T(,2)
+  }
+  
+
+  
+  /* priors for the zooplankton z_k */
+    for (iz in 1:N_Z) { # N_Z is the number of zooplankton
+      pz[iz, 1:3] ~ ddirch(c(1,1,1)) # uniform priors
+    }
+    
+  /* calculate tracers at the base of the food web and then in zooplankton */
+    for (iz in 1:N_Z) {
+      
+      ## Carrying out organic matter source mixing at the base of the food web
+      for (j in 1:N_T) {
+        mean_b[iz,j] <- pz[iz,1]*mean_A[j] + pz[iz,2]*mean_B[j] + pz[iz,3]*mean_C[j] 
+      }
+      
+      ## Carrying out trophic enrichment from food web base to zooplankton
+      ##This model only uses Source and Essential AA's, all non-fractionating
+
+      ## Non-fractionating AAs
+      for (j in i_T_non) {
+        mean_z[iz,j] <- mean_b[iz, j]
+      }
+
+      
+      ## tracer observations
+      for (j in i_T_mix) {
+        Y[iz,j] ~ dnorm(mean_z[iz,j] , 1/sd_Y[iz,j]^2)
+      }
+    }
+}"
+
+```
+
+## Setting up for MCMC {-}
+
+Organizing the input data for MCMC.
+```{r datalist, eval=TRUE}
+
+N_T <- length(tracers) # number of tracers
+N_S <- length(Sources)
+N_Z <- nrow(Data_zoops) # number of zooplankton samples
+
+
+data_1 <- list(
+  ## How many tracers will be used in this model?
+  N_T = N_T,
+  ## How many zooplankton samples are there?
+  N_Z = N_Z,
+  ## Where should the model look for zooplankton amino acid isotope data?
+  Y   = as.matrix(Data_zoops[tracers]),
+  ## and the analytical uncertainty in those measurements
+  sd_Y = as.matrix(Data_zoops[SDtracers]),
+  ## Which tracers do not fractionate?
+  i_T_non = which(tracers %in% c(tracers_d13C, tracers_d15N)),
+  i_T_mix = which(tracers %in% tracers_mixing)
+ 
+  )
+
+## Where should the model look for organic matter source data?
+## making generalized names A-F for a max of six possible organic matter sources
+sources_alpha <- c("X_A","X_B","X_C","X_D","X_E","X_F")
+SDsources_alpha <- c("sdX_A","sdX_B","sdX_C","sdX_D","sdX_E","sdX_F")
+nsams_alpha   <- c("N_A","N_B","N_C","N_D","N_E","N_F")
+## Loop through all sources described in setup chunks above to add that data
+## to the data_1 list as individual matrices for each source
+for (i in 1:N_S) {
+  sams_source <- Data_sources[Data_sources[[Source_Variable]]==Sources[i],c(tracers,SDtracers)]
+  data_1[[sources_alpha[i]]] = as.matrix(sams_source[tracers])
+  data_1[[SDsources_alpha[i]]] = as.double(colMeans(sams_source[SDtracers]))
+  data_1[[nsams_alpha[i]]]   = sum((Data_sources[[Source_Variable]]==Sources[i])*1)
+}
+
+if(length(data_1$i_T_non)==0){
+  data_1$i_T_non <- 0
+}
+if(length(data_1$i_T_frac)==0){
+  data_1$i_T_frac <- 0
+}
+if(length(data_1$i_T_const)==0){
+  data_1$i_T_const <- 0
+}
+if(length(data_1$i_T_var)==0){
+  data_1$i_T_var <- 0
+}
+```
+
+and defining our initial values.
+
+```{r initlist, eval=TRUE}
+set.seed(222)
+Nchains <- 3
+inits_1 <- vector(mode="list", length=Nchains) # initial values
+means_alpha <- c("mean_A","mean_B","mean_C","mean_D","mean_E","mean_F")
+sd_alpha <- c("sd_A","sd_B","sd_C","sd_D","sd_E","sd_F")
+fun_init_1 <- function(i) {
+  inits <- 
+    list(
+         # runif(length(tracers_d15N), 0, 20),
+         pz        = rdirichlet(n=N_Z, c(1,1,1)),
+         
+         .RNG.seed = i+1,
+         .RNG.name = c("base::Super-Duper", 
+                       "base::Wichmann-Hill",
+                       "base::Marsaglia-Multicarry")[i %% 3 + 1]
+    )
+
+  for (j in 1:N_S) {
+    inits[[means_alpha[j]]] = runif(N_T, -40, 20)
+    inits[[sd_alpha[j]]] = runif(N_T, 0, 2)
+  }
+  return(inits)
+}
+for (i in 1:Nchains) inits_1[[i]] <- fun_init_1(i)
+```
+
+## Running MCMC in JAGS {-}
+Now we can run the MCMC!
+
+```{r runjags, eval=TRUE}
+samsPerChain <- 5000 
+monitor_vars = c("mean_A", "sd_A",
+                 "mean_B", "sd_B",
+                 "mean_C", "sd_C",
+                 "mean_b", "mean_z",
+                 
+                 "pz"       )
+
+rjo_1 <- # S3 object of class "runjags"
+  run.jags(model = FWM_3,
+           data = data_1,
+           inits = inits_1,
+           silent.jags = FALSE,
+           n.chains = Nchains,
+           adapt  = 50000,
+           burnin = 40000,
+           thin = 4,
+           sample = samsPerChain,
+           method = "parallel",
+           modules = "glm",
+           monitor = monitor_vars
+          )
+```
+
+## Diagnostics {-} 
+Here we run some diagnostics. We use `diagMCMC` to check out model parameters and make sure chains are running properly. 
+
+```{r diagMu, eval=TRUE}
+
+diagMCMC(rjo_1$mcmc, parName="pz[1,1]")
+diagMCMC(rjo_1$mcmc, parName="pz[1,2]")
+diagMCMC(rjo_1$mcmc, parName="pz[1,3]")
+diagMCMC(rjo_1$mcmc, parName="mean_z[1,3]")
+
+```  
+
+
+# Model Assessment {-}
+We extract the data structures from the MCMC output and other relavent data There are a few different data types we need to get out of the MCMC output
+
+  1. Global model parameter posteriors
+  2. Consumer food web parameter posteriors 
+
+We'll look at these one at a time.
+
+## MCMC global parameter posteriors {-}
+
+```{r MCMC_global_param_extraction}
+## Grabbing MCMC model output
+sams <- as.matrix(rjo_1$mcmc)
+nsams <- nrow(sams)
+nsources <- length(Sources)
+nzoops <- nrow(Data_zoops)
+ntracers <- length(tracers)
+
+
+## 1. Global model parameter posteriors ##
+# we'll make a list which contains samples and summary data for each set of posteriors
+posts.global <- list(
+
+  mean_Sources = list(
+    samples = data.frame(matrix(nrow = nsams*nsources,ncol=0)),
+    HDI95 = data.frame(matrix(nrow = 2*nsources,ncol=0)),
+    HDI90 = data.frame(matrix(nrow = 2*nsources,ncol=0)),
+    HDI75 = data.frame(matrix(nrow = 2*nsources,ncol=0)),
+    HDI50 = data.frame(matrix(nrow = 2*nsources,ncol=0)),
+    mean = data.frame(matrix(nrow = 1*nsources,ncol=0)),
+    mode = data.frame(matrix(nrow = 1*nsources,ncol=0))
+  )
+)
+
+
+
+# grabbing Source posteriors
+source_alpha <- c("A","B","C","D","E","F")
+temp1<-temp2<-temp3<-c()
+# 1st column tells which source
+for (j in 1:length(Sources)) {
+  temp1 <- c(temp1, rep(Sources[j],nsams))
+  temp2 <- c(temp2, rep(Sources[j],2))
+  temp3 <- c(temp3, Sources[j])
+}
+posts.global$mean_Sources$samples$Pore <- temp1
+posts.global$mean_Sources$HDI95$Pore <-
+  posts.global$mean_Sources$HDI90$Pore <-
+  posts.global$mean_Sources$HDI75$Pore <-
+  posts.global$mean_Sources$HDI50$Pore <- temp2
+posts.global$mean_Sources$mean$Pore <-
+  posts.global$mean_Sources$mode$Pore <-temp3
+# next columns give respective source data
+for (i in 1:length(tracers)) {
+  temp1<-temp2<-temp3<-temp4<-temp5<-temp6<-temp7<-c()
+  for (j in 1:length(Sources)) {
+    temp1 <- c(temp1, sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")])
+    temp2 <- 
+      c(temp2, HDIofMCMC(sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")], credMass=0.95))
+    temp3 <- 
+      c(temp3, HDIofMCMC(sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")], credMass=0.90))
+    temp4 <- 
+      c(temp4, HDIofMCMC(sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")], credMass=0.75))
+    temp5 <- 
+      c(temp5, HDIofMCMC(sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")], credMass=0.50))
+    temp6 <- c(temp6, mean(sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")]))
+    temp7 <- c(temp7, post.mode(sams[,paste("mean_",source_alpha[j],"[",i,"]",sep = "")]))
+  }
+  posts.global$mean_Sources$samples[tracers[i]] <- temp1
+  posts.global$mean_Sources$HDI95[tracers[i]] <- temp2
+  posts.global$mean_Sources$HDI90[tracers[i]] <- temp3
+  posts.global$mean_Sources$HDI75[tracers[i]] <- temp4
+  posts.global$mean_Sources$HDI50[tracers[i]] <- temp5
+  posts.global$mean_Sources$mean[tracers[i]] <- temp6
+  posts.global$mean_Sources$mode[tracers[i]] <- temp7
+}
+
+# at times we'll want this data in long format so we'll handle that here as well
+posts.global.long <- list(
+  
+  mean_Sources = list(
+    samples = melt(posts.global$mean_Sources$samples, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA"),
+    HDI95 = melt(posts.global$mean_Sources$HDI95, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA"),
+    HDI90 = melt(posts.global$mean_Sources$HDI90, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA"),
+    HDI75 = melt(posts.global$mean_Sources$HDI75, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA"),
+    HDI50 = melt(posts.global$mean_Sources$HDI50, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA"),
+    mean = melt(posts.global$mean_Sources$mean, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA"),
+    mode = melt(posts.global$mean_Sources$mode, 
+                   id.vars = "Pore", value.name = "Value", variable.name = "AA")
+  )
+)
+
+# Generate columns indicate the amino acid and if it is a d15N or d13C value
+posts.global.long$mean_Sources$samples$Isotope <-
+  factor(substr(posts.global.long$mean_Sources$samples$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.global.long$mean_Sources$HDI95$Isotope <- 
+  factor(substr(posts.global.long$mean_Sources$HDI95$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.global.long$mean_Sources$HDI90$Isotope <- 
+  factor(substr(posts.global.long$mean_Sources$HDI90$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.global.long$mean_Sources$HDI75$Isotope <- 
+  factor(substr(posts.global.long$mean_Sources$HDI75$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.global.long$mean_Sources$HDI50$Isotope <- 
+  factor(substr(posts.global.long$mean_Sources$HDI50$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.global.long$mean_Sources$mean$Isotope <- 
+  factor(substr(posts.global.long$mean_Sources$mean$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.global.long$mean_Sources$mode$Isotope <- 
+  factor(substr(posts.global.long$mean_Sources$mode$AA, start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+
+
+```
+
+## MCMC zooplankton parameter posteriors {-}
+
+```{r MCMC_zoop_param_extract}
+## 2. Zooplankton food web parameter posteriors 
+sams <- as.matrix(rjo_1$mcmc)
+# we'll make a list which contains samples and summary data for each posterior
+posts.zoops <- list(
+  f = list(
+    samples = data.frame(matrix(nrow = nsams,ncol=0)),
+    HDI95 = data.frame(matrix(nrow = 2,ncol=0)),
+    HDI90 = data.frame(matrix(nrow = 2,ncol=0)),
+    HDI75 = data.frame(matrix(nrow = 2,ncol=0)),
+    HDI50 = data.frame(matrix(nrow = 2,ncol=0)),
+    mean = data.frame(matrix(nrow = 1,ncol=0)),
+    mode = data.frame(matrix(nrow = 1,ncol=0))
+  ),
+  trophic = list(
+    samples = data.frame(matrix(nrow = nsams,ncol=0)),
+    HDI95 = data.frame(matrix(nrow = 2,ncol=0)),
+    HDI90 = data.frame(matrix(nrow = 2,ncol=0)),
+    HDI75 = data.frame(matrix(nrow = 2,ncol=0)),
+    HDI50 = data.frame(matrix(nrow = 2,ncol=0)),
+    mean = data.frame(matrix(nrow = 1,ncol=0)),
+    mode = data.frame(matrix(nrow = 1,ncol=0))
+  ),
+  base = list(
+    samples = data.frame(matrix(nrow = nsams*nsources,ncol=0)),
+    HDI95 = data.frame(matrix(nrow = nsources*2,ncol=0)),
+    HDI90 = data.frame(matrix(nrow = nsources*2,ncol=0)),
+    HDI75 = data.frame(matrix(nrow = nsources*2,ncol=0)),
+    HDI50 = data.frame(matrix(nrow = nsources*2,ncol=0)),
+    mean = data.frame(matrix(nrow = nsources,ncol=0)),
+    mode = data.frame(matrix(nrow = nsources,ncol=0))
+  ),
+  zoop = list(
+    samples = data.frame(matrix(nrow = nsams*nzoops,ncol=0)),
+    HDI95 = data.frame(matrix(nrow = nzoops*2,ncol=0)),
+    HDI90 = data.frame(matrix(nrow = nzoops*2,ncol=0)),
+    HDI75 = data.frame(matrix(nrow = nzoops*2,ncol=0)),
+    HDI50 = data.frame(matrix(nrow = nzoops*2,ncol=0)),
+    mean = data.frame(matrix(nrow = nzoops,ncol=0)),
+    mode = data.frame(matrix(nrow = nzoops,ncol=0))
+  )
+)
+
+# grabbing f(source) posteriors
+temp1<-data.frame(matrix(ncol=length(variables),nrow=nzoops*nsams))
+temp2<-data.frame(matrix(ncol=length(variables),nrow=nzoops*2))
+temp3<-data.frame(matrix(ncol=length(variables),nrow=nzoops))
+colnames(temp1)<-colnames(temp2)<-colnames(temp3)<-variables
+# initial columns give info on each zooplankton sample
+for (j in 1:nzoops) {
+  temp1[((j-1)*nsams+1):(nsams*j),] <- Data_zoops[j,variables]
+  temp2[((j-1)*2+1):(2*j),] <- Data_zoops[j,variables]
+  temp3[j,] <- Data_zoops[j,variables]
+}
+
+#Assigning sample identificiation
+temp1$Pore <- factor(temp1$Pore, levels= c(1:12), labels = frac.color.breaks)
+temp2$Pore <- factor(temp2$Pore, levels= c(1:12), labels = frac.color.breaks)
+temp3$Pore <- factor(temp3$Pore, levels= c(1:12), labels = frac.color.breaks)
+
+temp1$Cruise <- factor(temp1$Cruise, levels= c(1:3), labels = cruise.breaks)
+temp2$Cruise <- factor(temp2$Cruise, levels= c(1:3), labels = cruise.breaks)
+temp3$Cruise <- factor(temp3$Cruise, levels= c(1:3), labels = cruise.breaks)
+
+temp1$Type <- factor(temp1$Type, levels= c(1:6), labels = type.breaks)
+temp2$Type <- factor(temp2$Type, levels= c(1:6), labels = type.breaks)
+temp3$Type <- factor(temp3$Type, levels= c(1:6), labels = type.breaks)
+
+
+
+posts.zoops$f$samples <- posts.zoops$trophic$samples <- posts.zoops$base$samples <- posts.zoops$zoop$samples <- temp1
+posts.zoops$f$HDI95 <- posts.zoops$trophic$HDI95 <- posts.zoops$base$HDI95 <- posts.zoops$zoop$HDI95 <-
+  posts.zoops$f$HDI90 <- posts.zoops$trophic$HDI90 <- posts.zoops$base$HDI90 <- posts.zoops$zoop$HDI90 <-
+  posts.zoops$f$HDI75 <- posts.zoops$trophic$HDI75 <- posts.zoops$base$HDI75 <- posts.zoops$zoop$HDI75 <-
+  posts.zoops$f$HDI50 <- posts.zoops$trophic$HDI50 <- posts.zoops$base$HDI50 <- posts.zoops$zoop$HDI50 <- temp2
+posts.zoops$f$mean <- posts.zoops$trophic$mean <- posts.zoops$base$mean <- posts.zoops$zoop$mean <-
+  posts.zoops$f$mode <- posts.zoops$trophic$mode <- posts.zoops$base$mode <- posts.zoops$zoop$mode <- temp3
+
+# next columns give respective f data for each source
+for (j in 1:nsources) {
+  temp1<-temp2<-temp3<-temp4<-temp5<-temp6<-temp7<-c()
+  for (i in 1:nzoops) {
+    temp1 <- c(temp1, sams[,paste("pz[",i,",",j,"]",sep = "")])
+    temp2 <- c(temp2, HDIofMCMC(sams[,paste("pz[",i,",",j,"]",sep = "")], credMass=0.95))
+    temp3 <- c(temp3, HDIofMCMC(sams[,paste("pz[",i,",",j,"]",sep = "")], credMass=0.90))
+    temp4 <- c(temp4, HDIofMCMC(sams[,paste("pz[",i,",",j,"]",sep = "")], credMass=0.75))
+    temp5 <- c(temp5, HDIofMCMC(sams[,paste("pz[",i,",",j,"]",sep = "")], credMass=0.50))
+    temp6 <- c(temp6, mean(sams[,paste("pz[",i,",",j,"]",sep = "")]))
+    temp7 <- c(temp7, post.mode(sams[,paste("pz[",i,",",j,"]",sep = "")]))
+  }
+  posts.zoops$f$samples[Sources[j]] <- temp1
+  posts.zoops$f$HDI95[Sources[j]] <- temp2
+  posts.zoops$f$HDI90[Sources[j]] <- temp3
+  posts.zoops$f$HDI75[Sources[j]] <- temp4
+  posts.zoops$f$HDI50[Sources[j]] <- temp5
+  posts.zoops$f$mean[Sources[j]] <- temp6
+  posts.zoops$f$mode[Sources[j]] <- temp7
+}
+
+
+# next columns give respective base values
+for (j in 1:ntracers) {
+  temp1<-temp2<-temp3<-temp4<-temp5<-temp6<-temp7<-c()
+  for (i in 1:nzoops) {
+    temp1 <- c(temp1, sams[,paste("mean_b[",i,",",j,"]",sep = "")])
+    temp2 <- c(temp2, HDIofMCMC(sams[,paste("mean_b[",i,",",j,"]",sep = "")], credMass=0.95))
+    temp3 <- c(temp3, HDIofMCMC(sams[,paste("mean_b[",i,",",j,"]",sep = "")], credMass=0.90))
+    temp4 <- c(temp4, HDIofMCMC(sams[,paste("mean_b[",i,",",j,"]",sep = "")], credMass=0.75))
+    temp5 <- c(temp5, HDIofMCMC(sams[,paste("mean_b[",i,",",j,"]",sep = "")], credMass=0.50))
+    temp6 <- c(temp6, mean(sams[,paste("mean_b[",i,",",j,"]",sep = "")]))
+    temp7 <- c(temp7, post.mode(sams[,paste("mean_b[",i,",",j,"]",sep = "")]))
+  }
+  posts.zoops$base$samples[tracers[j]] <- temp1
+  posts.zoops$base$HDI95[tracers[j]] <- temp2
+  posts.zoops$base$HDI90[tracers[j]] <- temp3
+  posts.zoops$base$HDI75[tracers[j]] <- temp4
+  posts.zoops$base$HDI50[tracers[j]] <- temp5
+  posts.zoops$base$mean[tracers[j]] <- temp6
+  posts.zoops$base$mode[tracers[j]] <- temp7
+}
+
+# next columns give respective oop values
+for (j in 1:ntracers) {
+  temp1<-temp2<-temp3<-temp4<-temp5<-temp6<-temp7<-c()
+  for (i in 1:nzoops) {
+    temp1 <- c(temp1, sams[,paste("mean_z[",i,",",j,"]",sep = "")])
+    temp2 <- c(temp2, HDIofMCMC(sams[,paste("mean_z[",i,",",j,"]",sep = "")], credMass=0.95))
+    temp3 <- c(temp3, HDIofMCMC(sams[,paste("mean_z[",i,",",j,"]",sep = "")], credMass=0.90))
+    temp4 <- c(temp4, HDIofMCMC(sams[,paste("mean_z[",i,",",j,"]",sep = "")], credMass=0.75))
+    temp5 <- c(temp5, HDIofMCMC(sams[,paste("mean_z[",i,",",j,"]",sep = "")], credMass=0.50))
+    temp6 <- c(temp6, mean(sams[,paste("mean_z[",i,",",j,"]",sep = "")]))
+    temp7 <- c(temp7, post.mode(sams[,paste("mean_z[",i,",",j,"]",sep = "")]))
+  }
+  posts.zoops$zoop$samples[tracers[j]] <- temp1
+  posts.zoops$zoop$HDI95[tracers[j]] <- temp2
+  posts.zoops$zoop$HDI90[tracers[j]] <- temp3
+  posts.zoops$zoop$HDI75[tracers[j]] <- temp4
+  posts.zoops$zoop$HDI50[tracers[j]] <- temp5
+  posts.zoops$zoop$mean[tracers[j]] <- temp6
+  posts.zoops$zoop$mode[tracers[j]] <- temp7
+}
+
+# at times we will want thinned samlpes for plotting purposes
+thin.by <- round(samsPerChain/100,0) # will select 1 out of every n samples
+thin.f <- seq(1,nrow(posts.zoops$f$samples),thin.by)
+posts.zoops$f$thin <- posts.zoops$f$samples[thin.f,]
+thin.trophic <- seq(1,nrow(posts.zoops$trophic$samples),thin.by)
+posts.zoops$trophic$thin <- posts.zoops$trophic$samples[thin.trophic,]
+thin.base <- seq(1,nrow(posts.zoops$base$samples),thin.by)
+posts.zoops$base$thin <- posts.zoops$base$samples[thin.base,]
+thin.zoop <- seq(1,nrow(posts.zoops$zoop$samples),thin.by)
+posts.zoops$zoop$thin <- posts.zoops$zoop$samples[thin.zoop,]
+
+# at times we'll want this data in long format so we'll handle that here as well
+posts.zoops.long <- list(
+  f = list(
+    samples = melt(posts.zoops$f$samples, 
+                   id.vars = variables, value.name = "f", variable.name = "Source"),
+    thin = melt(posts.zoops$f$thin, 
+                   id.vars = variables, value.name = "f", variable.name = "Source"),
+    HDI95 = melt(posts.zoops$f$HDI95, 
+               id.vars = variables, value.name = "f", variable.name = "Source"),
+    HDI90 = melt(posts.zoops$f$HDI90, 
+               id.vars = variables, value.name = "f", variable.name = "Source"),
+    HDI75 = melt(posts.zoops$f$HDI75, 
+               id.vars = variables, value.name = "f", variable.name = "Source"),
+    HDI50 = melt(posts.zoops$f$HDI50, 
+               id.vars = variables, value.name = "f", variable.name = "Source"),
+    mean = melt(posts.zoops$f$mean, 
+                id.vars = variables, value.name = "f", variable.name = "Source"),
+    mode = melt(posts.zoops$f$mode, 
+                id.vars = variables, value.name = "f", variable.name = "Source")
+  ),
+  trophic = list(
+    samples = melt(posts.zoops$trophic$samples, 
+                   id.vars = variables, value.name = "Value", variable.name = "Param"),
+    thin = melt(posts.zoops$trophic$thin, 
+                   id.vars = variables, value.name = "Value", variable.name = "Param"),
+    HDI95 = melt(posts.zoops$trophic$HDI95, 
+               id.vars = variables, value.name = "Value", variable.name = "Param"),
+    HDI90 = melt(posts.zoops$trophic$HDI90, 
+               id.vars = variables, value.name = "Value", variable.name = "Param"),
+    HDI75 = melt(posts.zoops$trophic$HDI75, 
+               id.vars = variables, value.name = "Value", variable.name = "Param"),
+    HDI50 = melt(posts.zoops$trophic$HDI50, 
+               id.vars = variables, value.name = "Value", variable.name = "Param"),
+    mean = melt(posts.zoops$trophic$mean, 
+                id.vars = variables, value.name = "Value", variable.name = "Param"),
+    mode = melt(posts.zoops$trophic$mode, 
+                id.vars = variables, value.name = "Value", variable.name = "Param")
+  ),
+  base = list(
+    samples = melt(posts.zoops$base$samples, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    thin = melt(posts.zoops$base$thin, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI95 = melt(posts.zoops$base$HDI95, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI90 = melt(posts.zoops$base$HDI90, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI75 = melt(posts.zoops$base$HDI75, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI50 = melt(posts.zoops$base$HDI50, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    mean = melt(posts.zoops$base$mean, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    mode = melt(posts.zoops$base$mode, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA")
+  ),
+  zoop = list(
+    samples = melt(posts.zoops$zoop$samples, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    thin = melt(posts.zoops$zoop$thin, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI95 = melt(posts.zoops$zoop$HDI95, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI90 = melt(posts.zoops$zoop$HDI90, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI75 = melt(posts.zoops$zoop$HDI75, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    HDI50 = melt(posts.zoops$zoop$HDI50, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    mean = melt(posts.zoops$zoop$mean, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA"),
+    mode = melt(posts.zoops$zoop$mode, 
+                   id.vars = variables, value.name = "Value", variable.name = "AA")
+  )
+)
+
+
+
+# We also want separate columns indicating the AA and the isotope in long format
+posts.zoops.long$base$samples$Isotope <- factor(substr(posts.zoops.long$base$samples$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$thin$Isotope <- factor(substr(posts.zoops.long$base$thin$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$HDI95$Isotope <- factor(substr(posts.zoops.long$base$HDI95$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$HDI90$Isotope <- factor(substr(posts.zoops.long$base$HDI90$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$HDI75$Isotope <- factor(substr(posts.zoops.long$base$HDI75$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$HDI50$Isotope <- factor(substr(posts.zoops.long$base$HDI50$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$mean$Isotope <- factor(substr(posts.zoops.long$base$mean$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$base$mode$Isotope <- factor(substr(posts.zoops.long$base$mode$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+
+
+#zoop
+posts.zoops.long$zoop$samples$Isotope <- factor(substr(posts.zoops.long$zoop$samples$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$thin$Isotope <- factor(substr(posts.zoops.long$zoop$thin$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$HDI95$Isotope <- factor(substr(posts.zoops.long$zoop$HDI95$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$HDI90$Isotope <- factor(substr(posts.zoops.long$zoop$HDI90$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$HDI75$Isotope <- factor(substr(posts.zoops.long$zoop$HDI75$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$HDI50$Isotope <- factor(substr(posts.zoops.long$zoop$HDI50$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$mean$Isotope <- factor(substr(posts.zoops.long$zoop$mean$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+posts.zoops.long$zoop$mode$Isotope <- factor(substr(posts.zoops.long$zoop$mode$AA,
+                                                     start=5, stop=7), levels = c("N", "C")) %>% addNA() %>% fct_na_value_to_level("Extra")
+
+
+#Combine medium and large particles for final analysis
+# Medium + Large particles
+temp1<-temp2<-temp3<-temp4<-temp5<-temp6<-temp7<- c()
+for (i in 1:nzoops) {
+    temp1 <- c(temp1, sams[,paste("pz[",i,",2]",sep = "")]+
+                 sams[,paste("pz[",i,",3]",sep = "")])
+    temp2 <-
+      c(temp2, HDIofMCMC(sams[,paste("pz[",i,",2]",sep = "")]+
+                           sams[,paste("pz[",i,",3]",sep = "")], credMass=0.95))
+    temp3 <-
+      c(temp3, HDIofMCMC(sams[,paste("pz[",i,",2]",sep = "")]+
+                           sams[,paste("pz[",i,",3]",sep = "")], credMass=0.90))
+    temp4 <-
+      c(temp4, HDIofMCMC(sams[,paste("pz[",i,",2]",sep = "")]+
+                           sams[,paste("pz[",i,",3]",sep = "")], credMass=0.75))
+    temp5 <-
+      c(temp5, HDIofMCMC(sams[,paste("pz[",i,",2]",sep = "")]+
+                           sams[,paste("pz[",i,",3]",sep = "")], credMass=0.50))
+    temp6 <-
+      c(temp6, mean(sams[,paste("pz[",i,",2]",sep = "")]+
+                      sams[,paste("pz[",i,",3]",sep = "")]))
+    temp7 <-
+      c(temp7, post.mode(sams[,paste("pz[",i,",2]",sep = "")]+
+                           sams[,paste("pz[",i,",3]",sep = "")]))
+  }
+  posts.zoops$f$samples$MedLarge <- temp1
+  posts.zoops$f$HDI95$MedLarge <- temp2
+  posts.zoops$f$HDI90$MedLarge <- temp3
+  posts.zoops$f$HDI75$MedLarge <- temp4
+  posts.zoops$f$HDI50$MedLarge <- temp5
+  posts.zoops$f$mean$MedLarge <- temp6
+  posts.zoops$f$mode$MedLarge <- temp7
+  
+#Assign similar "Small" name to 0.7-6 particles  
+posts.zoops$f$samples$Small <- posts.zoops$f$samples$"0.7-6 μm"
+posts.zoops$f$mode$Small <- posts.zoops$f$mode$"0.7-6 μm"
+posts.zoops$f$mean$Small <- posts.zoops$f$mean$"0.7-6 μm"
+posts.zoops$f$thin$Small <- posts.zoops$f$thin$"0.7-6 μm"
+posts.zoops$f$HDI95$Small <- posts.zoops$f$HDI95$"0.7-6 μm"
+posts.zoops$f$HDI90$Small <- posts.zoops$f$HDI90$"0.7-6 μm"
+posts.zoops$f$HDI75$Small <- posts.zoops$f$HDI75$"0.7-6 μm"
+posts.zoops$f$HDI50$Small <- posts.zoops$f$HDI50$"0.7-6 μm"
+
+  
+```
+
+Finally we extract the mean contribution of the particle types to each sample.
+
+```{r Tables_Export_All}
+
+#Mean Contribution
+
+#Select Idenitifying information of samples
+Animals = Data_zoops %>% dplyr::select(1:6)
+
+#Attach Particle Contribution and HDI95
+Mean_Contribution = cbind(Animals, posts.zoops$f$mean$Small, posts.zoops$f$mean$MedLarge)
+
+colnames(Mean_Contribution)[colnames(Mean_Contribution) == 'posts.zoops$f$mean$Small'] <- 'Small'
+colnames(Mean_Contribution)[colnames(Mean_Contribution) == 'posts.zoops$f$mean$MedLarge'] <- 'MedLarge'
+
+HDI95_Contribution_Small = as.data.frame(matrix(posts.zoops$f$HDI95$Small, ncol=2, byrow=TRUE))
+HDI95_Contribution_MedLarge = as.data.frame(matrix(posts.zoops$f$HDI95$MedLarge, ncol=2, byrow=TRUE))
+
+colnames(HDI95_Contribution_Small)[colnames(HDI95_Contribution_Small) == 'V1'] <- 'Small_95_Lower'
+colnames(HDI95_Contribution_Small)[colnames(HDI95_Contribution_Small) == 'V2'] <- 'Small_95_Higher'
+colnames(HDI95_Contribution_MedLarge)[colnames(HDI95_Contribution_MedLarge) == 'V1'] <- 'MedLarge_95_Lower'
+colnames(HDI95_Contribution_MedLarge)[colnames(HDI95_Contribution_MedLarge) == 'V2'] <- 'MedLarge_95_Higher'
+
+Mean_Contribution = cbind(Mean_Contribution, HDI95_Contribution_Small, HDI95_Contribution_MedLarge)
+
+#Arrange table order, select approraite columns
+Mean_Contribution = Mean_Contribution %>% arrange(Cruise, Depth)
+
+Mean_Contribution = Mean_Contribution %>%
+  dplyr::select(c(Pore, Type, Cruise, Oxygen_Category, Depth,
+                  Small, MedLarge, Small_95_Lower, Small_95_Higher,
+                  MedLarge_95_Lower, MedLarge_95_Higher))
+
+#Find Me
+
+#Export Final Table
+write.xlsx(Mean_Contribution, "../Bayesian_Code/Excel_Sheets//Mean_Contribution_Zooplankton_Demo.xlsx")
+
+```
+
+
+
+
+
+
+

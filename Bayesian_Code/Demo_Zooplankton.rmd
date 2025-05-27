@@ -59,10 +59,7 @@ opts_chunk$set(comment="  ",
                out.width="95%"
                )
 
-# setting the ggplot theme
-theme_set(theme_classic2()+
-            theme(panel.grid.major.x = element_line(colour = "grey95"),
-                  panel.grid.major.y = element_line(colour = "grey95")))
+
 # defining a ggplot object to remove the x axis
 no.x.axis <- theme(axis.title.x=element_blank(),
                    axis.text.x=element_blank(),
@@ -432,6 +429,9 @@ sources.long$AA <- factor(substr(sources.long$AA, start=1, stop=3), levels = all
 
 AA_plots <-
   ggplot(sources.long, aes(x = AA, y = value, color = Pore, group=Pore))+
+  theme_classic2()+
+  theme(panel.grid.major.x = element_line(colour = "grey95"),
+        panel.grid.major.y = element_line(colour = "grey95"))+
   geom_point(alpha=1, size=2.5, position = position_dodge(width = 0.8))+
   ylab(expression(delta^{15}*N*"   or   "*delta^{13}*C*" (\u2030)"))+
   labs(color="Pore", shape="Food Web Base", fill="Zooplankton Samples")+

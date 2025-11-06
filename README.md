@@ -5,6 +5,9 @@ Data is provided in folder named Source_Data, which includes individual Excel fi
 
 JAGS software needs to be downloaded from https://sourceforge.net/projects/mcmc-jags/files/ in order to run this code. See Bayesian_Code/Readme.docx for further instructions. 
 
-Currently in review.
+Published in Nature Communcications.
 
-Zenodo, Citation, and URL of publication will be released when available.
+Dowd, M.H., Assad, V.E., Cazares-Nuesser, A.E. et al. Deep-sea mining discharge can disrupt midwater food webs. Nat Commun 16, 9575 (2025). https://doi.org/10.1038/s41467-025-65411-w
+
+https://www.nature.com/articles/s41467-025-65411-w
+
